@@ -7,6 +7,8 @@ static const int PIN_PWM_CH2 = 4;
 
 static const int PIN_ENCs[] = {5, 6, 7, 8};  // wheel encoders
 
+static const int PIN_RC[] = {11, 12}; // RC ch. 1 & 2
+
 static volatile uint8_t reg = 0;
 static volatile uint8_t i2cdata[32] = {1, 0, 0};
 // i2c Register Map:
@@ -45,6 +47,8 @@ static const int NUM_ADDRS = 0x18;
 static volatile bool dirty = true;  // set to true after a finished write call
 
 void i2cOnReceive(int numBytes) {
+  Serial.print("received: ");
+  Serial.println(numBytes);
   if (Wire.available()) {
     reg = Wire.read() & (sizeof(i2cdata) - 1);
   }
@@ -70,7 +74,10 @@ void setup() {
   for (int8_t i = 0; i < 4; i++) {
     pinMode(PIN_ENCs[i], INPUT);
   }
-  analogWriteFrequency(3, PWM_HZ);
+  for (int8_t i = 0; i < 2; i++) {
+    pinMode(PIN_RC[i], INPUT);
+  }
+  analogWriteFrequency(PIN_PWM_CH1, PWM_HZ);
   analogWriteResolution(16);
 
   Serial.begin(115200);
@@ -96,14 +103,22 @@ static bool last_w[4] = {false, false, false, false};
 static uint16_t enc_counts[4] = {0, 0, 0, 0};
 static uint32_t enc_timestamps[4] = {0, 0, 0, 0};
 
+static bool last_rc[2] = {false, false};
+static uint16_t rc_pw[2] = {0, 0};
+static uint32_t rc_timestamps[2] = {0, 0};
+
+
 void loop() {
   uint16_t servo_value = analogRead(0);  // or is it 
+
+  bool any_changed = false;
 
   {
     bool w;
     for (uint8_t i = 0; i < 4; i++) {
       w = digitalRead(PIN_ENCs[i]);
       if (w != last_w[i]) {
+        any_changed = true;
         uint16_t count = enc_counts[i] + 1;
         uint32_t timestamp = micros();
         cli();  // make sure to atomically set i2cdata
@@ -121,24 +136,49 @@ void loop() {
           enc_timestamps[i] = timestamp;
         }
         last_w[i] = w;
-#if 0
-        Serial.print("encoder ");
-        Serial.print(i);
-        Serial.print(" count ");
-        Serial.print(count);
-        Serial.print(" dt ");
-        Serial.println(dt);
-#endif
       }
     }
   }
+
+  bool rc;
+  for (uint8_t i = 0; i < 2; i++) {
+      rc = digitalRead(PIN_RC[i]);
+      if (rc != last_rc[i]) {
+        any_changed = true;
+        uint32_t timestamp = micros();
+        if (rc) {
+          rc_timestamps[i] = timestamp;
+        }
+        else {
+          rc_pw[i] = timestamp - rc_timestamps[i];
+        }
+        last_rc[i] = rc;
+      }
+  }
+
+  #if 1
+    if (any_changed) {
+        Serial.print("enc: ");
+        for (uint8_t i = 0; i < 4; i++) {
+          Serial.print(enc_counts[i]);
+          Serial.print(" ");
+        }
+        Serial.print("rc: ");
+        for (uint8_t i = 0; i < 2; i++) {
+          Serial.print(rc_pw[i]);
+          Serial.print(" ");
+        }
+        Serial.println();
+    }
+//        Serial.print(" dt ");
+//        Serial.println(dt);
+#endif
 
   i2cdata[ADDR_SRV] = servo_value >> 2;  // 10 bits -> 8 bits, though the practical range may be smaller
   if (dirty) {
     digitalWrite(13, i2cdata[0] & 1);
     analogWrite(PIN_PWM_CH1, servo_pw((int8_t) i2cdata[1]));
     analogWrite(PIN_PWM_CH2, servo_pw((int8_t) i2cdata[2]));
-
     // reload encoder counts from i2cdata also
     for (uint8_t i = 0; i < 4; i++) {
       uint16_t count = i2cdata[ADDR_ENCODER_COUNT + 2*i]
