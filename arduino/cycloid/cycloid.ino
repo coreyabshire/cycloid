@@ -2,12 +2,13 @@
 
 static const float PWM_HZ = 100;
 
-static const int PIN_PWM_CH1 = 3;
-static const int PIN_PWM_CH2 = 4;
+static const int PIN_PWM_CH1 = 3; // (th)
+static const int PIN_PWM_CH2 = 4; // (st)
 
 static const int PIN_ENCs[] = {5, 6, 7, 8};  // wheel encoders
 
-static const int PIN_RC[] = {11, 12}; // RC ch. 1 & 2
+#define STEERING_RC_PIN 11
+#define THROTTLE_RC_PIN 12
 
 static volatile uint8_t reg = 0;
 static volatile uint8_t i2cdata[32] = {1, 0, 0};
@@ -46,6 +47,25 @@ static const int ADDR_ENCODER_PERIOD = 0x10;
 static const int NUM_ADDRS = 0x18;
 static volatile bool dirty = true;  // set to true after a finished write call
 
+class PulseWidthTimer {
+public:
+  explicit PulseWidthTimer() : start_(0), width_(0) {}
+  void Change(bool value) {
+    if (value)
+      start_ = micros();
+    else
+      width_ = micros() - start_;
+  }
+  uint32_t Read() { return width_; }
+private:
+  uint32_t start_;  
+  uint32_t width_;
+};
+
+PulseWidthTimer steeringTimer;
+PulseWidthTimer throttleTimer;
+
+
 void i2cOnReceive(int numBytes) {
   Serial.print("received: ");
   Serial.println(numBytes);
@@ -74,13 +94,18 @@ void setup() {
   for (int8_t i = 0; i < 4; i++) {
     pinMode(PIN_ENCs[i], INPUT);
   }
-  for (int8_t i = 0; i < 2; i++) {
-    pinMode(PIN_RC[i], INPUT);
-  }
+
+  pinMode(STEERING_RC_PIN, INPUT);
+  pinMode(THROTTLE_RC_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(STEERING_RC_PIN), steeringTimerChange, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(THROTTLE_RC_PIN), throttleTimerChange, CHANGE);
+
+  
   analogWriteFrequency(PIN_PWM_CH1, PWM_HZ);
   analogWriteResolution(16);
 
   Serial.begin(115200);
+  //Serial.begin(2000000);
 
   Wire.begin(118);
   Wire.onReceive(i2cOnReceive);
@@ -99,13 +124,20 @@ uint16_t servo_pw(int8_t value) {
   return (12484608L + 32768L * value) / 1270;
 }
 
+int clamp(int x, int a, int b) {
+  return x < a ? a : (x > b ? b : x);
+}
+
+int8_t rc_value(uint16_t pw) {
+  return clamp(pw - 1500, -500, 500) >> 2;
+}
+
 static bool last_w[4] = {false, false, false, false};
 static uint16_t enc_counts[4] = {0, 0, 0, 0};
 static uint32_t enc_timestamps[4] = {0, 0, 0, 0};
 
-static bool last_rc[2] = {false, false};
-static uint16_t rc_pw[2] = {0, 0};
-static uint32_t rc_timestamps[2] = {0, 0};
+static uint32_t rc_pw[2] = {0, 0};
+static int8_t rc_values[2] = {0, 0};
 
 
 void loop() {
@@ -113,6 +145,7 @@ void loop() {
 
   bool any_changed = false;
 
+#if 1
   {
     bool w;
     for (uint8_t i = 0; i < 4; i++) {
@@ -139,24 +172,19 @@ void loop() {
       }
     }
   }
+#endif
 
-  bool rc;
+  noInterrupts();
+  rc_pw[0] = steeringTimer.Read();
+  rc_pw[1] = throttleTimer.Read();
+  interrupts();
+  
   for (uint8_t i = 0; i < 2; i++) {
-      rc = digitalRead(PIN_RC[i]);
-      if (rc != last_rc[i]) {
-        any_changed = true;
-        uint32_t timestamp = micros();
-        if (rc) {
-          rc_timestamps[i] = timestamp;
-        }
-        else {
-          rc_pw[i] = timestamp - rc_timestamps[i];
-        }
-        last_rc[i] = rc;
-      }
+    rc_values[i] = rc_value(rc_pw[i]);
+    i2cdata[ADDR_RC + i] = rc_values[i];
   }
 
-  #if 1
+  #if 0
     if (any_changed) {
         Serial.print("enc: ");
         for (uint8_t i = 0; i < 4; i++) {
@@ -167,6 +195,8 @@ void loop() {
         for (uint8_t i = 0; i < 2; i++) {
           Serial.print(rc_pw[i]);
           Serial.print(" ");
+          Serial.print(rc_values[i]);
+          Serial.print(" ");
         }
         Serial.println();
     }
@@ -174,6 +204,7 @@ void loop() {
 //        Serial.println(dt);
 #endif
 
+#if 1
   i2cdata[ADDR_SRV] = servo_value >> 2;  // 10 bits -> 8 bits, though the practical range may be smaller
   if (dirty) {
     digitalWrite(13, i2cdata[0] & 1);
@@ -187,4 +218,14 @@ void loop() {
     }
     dirty = false;
   }
+#endif
+
+}
+
+void steeringTimerChange() {
+  steeringTimer.Change(digitalRead(STEERING_RC_PIN));
+}
+
+void throttleTimerChange() {
+  throttleTimer.Change(digitalRead(THROTTLE_RC_PIN));
 }
